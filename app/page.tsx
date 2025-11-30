@@ -4,26 +4,15 @@ import { useState } from "react";
 import AgentLog from "./components/AgentLog";
 import FileUpload from "./components/FileUpload";
 import FinancialChart from "./components/FinancialChart";
-import { tools } from "@/lib/tools";
 
 export default function Home() {
   const [task, setTask] = useState("");
   const [plan, setPlan] = useState<any>(null);
   const [result, setResult] = useState<any>(null);
-  const [logs, setLogs] = useState<{ step: string; status: "pending" | "done" | "error" }[]>([]);
+  const [logs, setLogs] = useState<{ step: string; status: string; message?: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-
-  const stepMap: Record<string, string> = {
-    load_financial_data: "load_financial_data",
-    clean_and_validate_data: "clean_and_validate_data",
-    perform_financial_analysis: "perform_financial_analysis",
-    generate_financial_charts: "generate_financial_charts",
-    compile_report_document: "compile_report_document",
-    review_and_finalize_report: "review_and_finalize_report",
-    distribute_report: "distribute_report",
-    export_report: "export_report",
-  };
+  const [running, setRunning] = useState(false);
 
   const createPlan = async () => {
     setError(null);
@@ -37,102 +26,97 @@ export default function Home() {
         body: JSON.stringify({ task }),
       });
       const data = await res.json();
-      setPlan(data.plan);
-      if (data.plan.steps?.[0]?.action === "error") {
-        setError(data.plan.steps[0].message);
+      if (data.error) {
+        setError(data.error);
+        return;
       }
+      setPlan(data.plan);
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message ?? String(e));
     }
   };
+
+  // helper: convert file to base64
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string; // data:*/*;base64,AAAA...
+        // drop prefix
+        const base64 = result.split(",")[1];
+        res(base64);
+      };
+      reader.onerror = (err) => rej(err);
+      reader.readAsDataURL(file);
+    });
 
   const runExecutor = async () => {
-    if (!plan) return;
+    if (!plan) {
+      setError("Create a plan first");
+      return;
+    }
     setError(null);
-    setResult({});
+    setResult(null);
     setLogs([]);
+    setRunning(true);
+
     try {
-      const newState: any = { uploadedFile };
-      for (const step of plan.steps) {
-        setLogs((prev) => [...prev, { step: step.action, status: "pending" }]);
-        try {
-          const toolName = stepMap[step.action] || step.action;
-          if (tools[toolName]) {
-            const output = await tools[toolName](newState, step.args);
-            newState[step.action] = output;
-          } else {
-            newState[step.action] = step.args || "executed";
-          }
-          setLogs((prev) =>
-            prev.map((l) =>
-              l.step === step.action ? { ...l, status: "done" } : l
-            )
-          );
-        } catch (e: any) {
-          setLogs((prev) =>
-            prev.map((l) =>
-              l.step === step.action ? { ...l, status: "error" } : l
-            )
-          );
-          console.error(`Error executing ${step.action}:`, e);
+      let fileBase64: string | undefined = undefined;
+      if (uploadedFile) {
+        fileBase64 = await fileToBase64(uploadedFile);
+      }
+
+      const res = await fetch("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan, fileBase64 }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setResult(data.result);
+        // Compose logs in order from server (server pushed pending + done entries)
+        if (Array.isArray(data.logs)) {
+          setLogs(data.logs);
+        } else {
+          setLogs([]);
         }
       }
-      setResult(newState);
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message ?? String(e));
+    } finally {
+      setRunning(false);
     }
-  };
-
-  const exportReport = async () => {
-    if (!result) return;
-    const output = await tools.export_report(result, ["pdf", "Excel"]);
-    console.log("Exported:", output);
-    alert(`Export completed: ${output.join(", ")}`);
   };
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold mb-4">OfficeOps AI Agent</h1>
+      <h1 className="text-3xl font-bold mb-4">OfficeOps — General Agent</h1>
 
       <textarea
         value={task}
         onChange={(e) => setTask(e.target.value)}
-        placeholder="Zadajte úlohu..."
-        className="border p-2 w-full h-20 mb-4"
+        placeholder="Describe what you want. e.g. 'Create a quarterly finance report from the uploaded Excel and export PDF & Excel and email it to team.'"
+        className="border p-2 w-full h-24 mb-4"
       />
 
-      <FileUpload onFileSelect={(file) => setUploadedFile(file)} />
+      <FileUpload onFileSelect={(f) => setUploadedFile(f)} />
 
       <div className="flex gap-2 mb-4">
-        <button
-          onClick={createPlan}
-          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition"
-        >
-          Vytvoriť plán
+        <button onClick={createPlan} className="bg-blue-600 text-white px-4 py-2 rounded">
+          Create plan
         </button>
-        <button
-          onClick={runExecutor}
-          className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 transition"
-        >
-          Spustiť agent
-        </button>
-        <button
-          onClick={exportReport}
-          className="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600 transition"
-        >
-          Export report
+        <button onClick={runExecutor} disabled={running} className="bg-green-600 text-white px-4 py-2 rounded">
+          {running ? "Running..." : "Run agent"}
         </button>
       </div>
 
-      {error && (
-        <div className="bg-red-200 text-red-800 p-2 mb-4 rounded">
-          <strong>Chyba:</strong> {error}
-        </div>
-      )}
+      {error && <div className="bg-red-200 text-red-800 p-2 mb-4 rounded">{error}</div>}
 
       {plan && (
         <div className="mb-4">
-          <h2 className="font-semibold mb-2">Plán (JSON)</h2>
+          <h2 className="font-semibold mb-2">Plan (JSON)</h2>
           <pre className="bg-gray-100 p-2 rounded overflow-x-auto">
             <code>{JSON.stringify(plan, null, 2)}</code>
           </pre>
@@ -140,13 +124,13 @@ export default function Home() {
       )}
 
       <div className="mb-4">
-        <h2 className="font-semibold mb-2">Live Log</h2>
-        <AgentLog logs={logs} />
+        <h2 className="font-semibold mb-2">Execution Log</h2>
+        <AgentLog logs={logs as any} />
       </div>
 
       {result && Object.keys(result).length > 0 && (
         <div className="mb-4">
-          <h2 className="font-semibold mb-2">Výsledky exekúcie</h2>
+          <h2 className="font-semibold mb-2">Result</h2>
           <pre className="bg-gray-200 p-2 rounded overflow-x-auto">
             <code>{JSON.stringify(result, null, 2)}</code>
           </pre>
@@ -155,12 +139,12 @@ export default function Home() {
 
       {result?.excelData && result.excelData.length > 0 && (
         <div className="mb-4">
-          <h2 className="font-semibold mb-2">Grafy finančnej výkonnosti</h2>
+          <h2 className="font-semibold mb-2">Charts</h2>
           <FinancialChart
-            data={result.excelData.map((row) => ({
-              revenue: row.revenue || 0,
-              expenses: row.expenses || 0,
-              profit: row.profit || 0,
+            data={result.excelData.map((row: any) => ({
+              revenue: Number(row.revenue ?? row.Revenue ?? 0),
+              expenses: Number(row.expenses ?? row.Expenses ?? 0),
+              profit: Number(row.profit ?? (row.revenue ?? 0) - (row.expenses ?? 0)),
             }))}
           />
         </div>
